@@ -8,8 +8,8 @@ Double-click **REMOVE LAGLENS COMPLETELY.cmd**, then type `REMOVE` when prompted
 
 The removal tool will:
 
-1. Signal the active background recorder to stop and wait for confirmation.
-2. Remove `LagLens Background Monitor.lnk` from the current user's Windows Startup folder and `Mark Lag Now.lnk` from the desktop.
+1. Signal the active background recorder and continuous UI sentinel to stop and wait for confirmation.
+2. Unregister the `LagLens Background Monitor` scheduled task, remove any fallback Startup shortcut, and remove `Mark Lag Now.lnk` from the desktop.
 3. Permanently delete the `outputs\LagLens` folder, including every HTML, CSV, JSON, status, and live diagnostic log.
 4. Leave `outputs\LagLens-removal-receipt.txt` confirming exactly what was removed.
 
@@ -35,7 +35,7 @@ Codex should:
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\REMOVE_LAGLENS.ps1" -Force
    ```
 
-5. Verify that the Startup shortcut and `outputs\LagLens` no longer exist, and report the receipt location.
+5. Verify that the scheduled task, fallback Startup shortcut, and `outputs\LagLens` no longer exist, and report the receipt location.
 
 ## Manual fallback
 

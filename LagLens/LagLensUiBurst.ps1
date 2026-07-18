@@ -1,12 +1,15 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(3, 600)]
+    [ValidateRange(3, 86400)]
     [int]$DurationSeconds = 120,
 
     [ValidateRange(250, 5000)]
     [int]$IntervalMilliseconds = 1000,
 
     [string]$MarkerTimestamp = '',
+
+    [ValidateSet('Marker', 'Continuous')]
+    [string]$CaptureMode = 'Marker',
 
     [string]$OutputDirectory = ''
 )
@@ -120,7 +123,12 @@ namespace LagLensUiBurst
 
 function New-Counter([string]$Category, [string]$Counter, [string]$Instance) {
     try {
-        $pc = New-Object System.Diagnostics.PerformanceCounter -ArgumentList @($Category, $Counter, $Instance, $true)
+        if ([string]::IsNullOrWhiteSpace($Instance)) {
+            $pc = New-Object System.Diagnostics.PerformanceCounter -ArgumentList @($Category, $Counter, $true)
+        }
+        else {
+            $pc = New-Object System.Diagnostics.PerformanceCounter -ArgumentList @($Category, $Counter, $Instance, $true)
+        }
         [void]$pc.NextValue()
         return $pc
     }
@@ -135,18 +143,26 @@ function Read-Counter($Counter) {
 function Get-ForegroundSample {
     $handle = [LagLensUiBurst.NativeMethods]::GetForegroundWindow()
     if ($handle -eq [IntPtr]::Zero) {
-        return [pscustomobject]@{ Process = ''; ProcessId = 0; ResponseMs = 0.0; Hung = $false; WorkingSetMB = 0.0; CpuSeconds = 0.0 }
+        return [pscustomobject]@{ Process = ''; ProcessId = 0; ResponseMs = 0.0; Hung = $false; Responding = $true; WorkingSetMB = 0.0; PrivateMemoryMB = 0.0; ThreadCount = 0; HandleCount = 0; CpuSeconds = 0.0 }
     }
 
     $processId = [uint32]0
     [void][LagLensUiBurst.NativeMethods]::GetWindowThreadProcessId($handle, [ref]$processId)
     $name = ''
     $workingSetMB = 0.0
+    $privateMemoryMB = 0.0
+    $threadCount = 0
+    $handleCount = 0
+    $responding = $true
     $cpuSeconds = 0.0
     try {
         $process = Get-Process -Id $processId -ErrorAction Stop
         $name = $process.ProcessName
         $workingSetMB = [double]$process.WorkingSet64 / 1MB
+        $privateMemoryMB = [double]$process.PrivateMemorySize64 / 1MB
+        $threadCount = @($process.Threads).Count
+        $handleCount = [int]$process.HandleCount
+        $responding = [bool]$process.Responding
         if ($null -ne $process.CPU) { $cpuSeconds = [double]$process.CPU }
     }
     catch { }
@@ -160,7 +176,11 @@ function Get-ForegroundSample {
         ProcessId = $processId
         ResponseMs = [Math]::Round($stopwatch.Elapsed.TotalMilliseconds, 2)
         Hung = ($result -eq [IntPtr]::Zero)
+        Responding = $responding
         WorkingSetMB = $workingSetMB
+        PrivateMemoryMB = $privateMemoryMB
+        ThreadCount = $threadCount
+        HandleCount = $handleCount
         CpuSeconds = $cpuSeconds
     }
 }
@@ -189,6 +209,12 @@ function Get-InputSample {
 $cpuCounter = New-Counter 'Processor' '% Processor Time' '_Total'
 $utilityCounter = New-Counter 'Processor Information' '% Processor Utility' '_Total'
 $frequencyCounter = New-Counter 'Processor Information' 'Actual Frequency' '_Total'
+$queueCounter = New-Counter 'System' 'Processor Queue Length' ''
+$contextSwitchCounter = New-Counter 'System' 'Context Switches/sec' ''
+$dpcCounter = New-Counter 'Processor' '% DPC Time' '_Total'
+$interruptCounter = New-Counter 'Processor' '% Interrupt Time' '_Total'
+$pageReadCounter = New-Counter 'Memory' 'Page Reads/sec' ''
+$diskLatencyCounter = New-Counter 'PhysicalDisk' 'Avg. Disk sec/Transfer' '_Total'
 $logicalProcessors = [Math]::Max(1, [Environment]::ProcessorCount)
 $processCpu = @{}
 $start = Get-Date
@@ -196,12 +222,18 @@ $previousTime = $start
 $previousDwm = Get-DwmSample
 $previousInput = Get-InputSample
 $stamp = $start.ToString('yyyyMMdd-HHmmssfff')
-$outputPath = Join-Path $reports "LagLens-$stamp-ui-burst.csv"
+$outputSuffix = if ($CaptureMode -eq 'Continuous') { 'ui-continuous' } else { 'ui-burst' }
+$outputPath = Join-Path $reports "LagLens-$stamp-$outputSuffix.csv"
+$nextIntervalMilliseconds = $IntervalMilliseconds
+try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop } catch { }
 
 while (((Get-Date) - $start).TotalSeconds -lt $DurationSeconds) {
-    Start-Sleep -Milliseconds $IntervalMilliseconds
+    $sleepIntervalMilliseconds = $nextIntervalMilliseconds
+    Start-Sleep -Milliseconds $sleepIntervalMilliseconds
     $now = Get-Date
     $intervalSeconds = [Math]::Max(0.1, ($now - $previousTime).TotalSeconds)
+    $sampleIntervalMilliseconds = $intervalSeconds * 1000.0
+    $recorderDelayMilliseconds = [Math]::Max(0.0, $sampleIntervalMilliseconds - $sleepIntervalMilliseconds)
     $foreground = Get-ForegroundSample
     $dwm = Get-DwmSample
     $input = Get-InputSample
@@ -233,34 +265,79 @@ while (((Get-Date) - $start).TotalSeconds -lt $DurationSeconds) {
     $powerSource = 'Unknown'
     $batteryPercent = -1.0
     try {
-        Add-Type -AssemblyName System.Windows.Forms
         $power = [System.Windows.Forms.SystemInformation]::PowerStatus
         $powerSource = switch ([string]$power.PowerLineStatus) { 'Online' { 'AC' } 'Offline' { 'Battery' } default { 'Unknown' } }
         if ($power.BatteryLifePercent -ge 0) { $batteryPercent = [Math]::Round([double]$power.BatteryLifePercent * 100, 1) }
     }
     catch { }
 
+    $nextIntervalMilliseconds = if ($CaptureMode -eq 'Continuous' -and $powerSource -eq 'Battery') {
+        [Math]::Max(2000, $IntervalMilliseconds)
+    }
+    else {
+        $IntervalMilliseconds
+    }
+
+    $inputOccurred = ($input.Tick -ne $previousInput.Tick)
+    $cpuPct = [Math]::Max(0, [Math]::Min(100, (Read-Counter $cpuCounter)))
+    $cpuUtilityPct = [Math]::Max(0, (Read-Counter $utilityCounter))
+    $frequencyMHz = [Math]::Max(0, (Read-Counter $frequencyCounter))
+    $queueLength = [Math]::Max(0, (Read-Counter $queueCounter))
+    $contextSwitches = [Math]::Max(0, (Read-Counter $contextSwitchCounter))
+    $dpcPct = [Math]::Max(0, (Read-Counter $dpcCounter))
+    $interruptPct = [Math]::Max(0, (Read-Counter $interruptCounter))
+    $pageReads = [Math]::Max(0, (Read-Counter $pageReadCounter))
+    $diskLatencyMs = [Math]::Max(0, (Read-Counter $diskLatencyCounter) * 1000.0)
+
+    $stallReasons = New-Object System.Collections.Generic.List[string]
+    if ($foreground.Hung -or -not $foreground.Responding) { $stallReasons.Add('ForegroundHung') }
+    elseif ($foreground.ResponseMs -ge 100) { $stallReasons.Add('ForegroundResponse100ms') }
+    if ($recorderDelayMilliseconds -ge 750) { $stallReasons.Add('RecorderSchedulingDelay750ms') }
+    if ($dwmMissed -ge 2) { $stallReasons.Add('DwmMissedFrames') }
+    if ($dwmDropped -ge 1) { $stallReasons.Add('DwmDroppedFrames') }
+    if ($inputOccurred -and $dwm.RefreshHz -ge 50 -and $dwmRefreshFps -gt 0 -and $dwmRefreshFps -lt ($dwm.RefreshHz * 0.60)) {
+        $stallReasons.Add('LowDesktopFpsDuringInput')
+    }
+    if ($dpcPct -ge 10) { $stallReasons.Add('DpcPressure') }
+    if ($diskLatencyMs -ge 100) { $stallReasons.Add('DiskLatency100ms') }
+
     $row = [pscustomobject]@{
         Timestamp = $now.ToString('o')
+        CaptureMode = $CaptureMode
         MarkerTimestamp = $MarkerTimestamp
         ElapsedSeconds = [Math]::Round(($now - $start).TotalSeconds, 2)
+        RequestedIntervalMs = $sleepIntervalMilliseconds
+        SampleIntervalMs = [Math]::Round($sampleIntervalMilliseconds, 2)
+        RecorderDelayMs = [Math]::Round($recorderDelayMilliseconds, 2)
         ForegroundProcess = $foreground.Process
         ForegroundProcessId = $foreground.ProcessId
         ForegroundResponseMs = $foreground.ResponseMs
         ForegroundHung = [bool]$foreground.Hung
+        ForegroundResponding = [bool]$foreground.Responding
         ForegroundCpuPct = [Math]::Round([Math]::Max(0, $foregroundCpuPct), 2)
         ForegroundWorkingSetMB = [Math]::Round([Math]::Max(0, $foreground.WorkingSetMB), 1)
-        InputOccurredSincePriorSample = ($input.Tick -ne $previousInput.Tick)
+        ForegroundPrivateMemoryMB = [Math]::Round([Math]::Max(0, $foreground.PrivateMemoryMB), 1)
+        ForegroundThreadCount = $foreground.ThreadCount
+        ForegroundHandleCount = $foreground.HandleCount
+        InputOccurredSincePriorSample = $inputOccurred
         MillisecondsSinceLastInput = [Math]::Round($input.MillisecondsAgo, 0)
-        CpuPct = [Math]::Round([Math]::Max(0, [Math]::Min(100, (Read-Counter $cpuCounter))), 2)
-        CpuUtilityPct = [Math]::Round([Math]::Max(0, (Read-Counter $utilityCounter)), 2)
-        ActualFrequencyMHz = [Math]::Round([Math]::Max(0, (Read-Counter $frequencyCounter)), 0)
+        CpuPct = [Math]::Round($cpuPct, 2)
+        CpuUtilityPct = [Math]::Round($cpuUtilityPct, 2)
+        ActualFrequencyMHz = [Math]::Round($frequencyMHz, 0)
+        ProcessorQueueLength = [Math]::Round($queueLength, 2)
+        ContextSwitchesPerSec = [Math]::Round($contextSwitches, 0)
+        DpcTimePct = [Math]::Round($dpcPct, 2)
+        InterruptTimePct = [Math]::Round($interruptPct, 2)
+        PageReadsPerSec = [Math]::Round($pageReads, 2)
+        DiskLatencyMs = [Math]::Round($diskLatencyMs, 2)
         DwmAvailable = [bool]$dwm.Available
         DwmConfiguredRefreshHz = [Math]::Round($dwm.RefreshHz, 2)
         DwmObservedRefreshFps = [Math]::Round($dwmRefreshFps, 2)
         DwmComposedFps = [Math]::Round($dwmComposedFps, 2)
         DwmFramesMissed = [Math]::Round($dwmMissed, 0)
         DwmFramesDropped = [Math]::Round($dwmDropped, 0)
+        AutoStallDetected = ($stallReasons.Count -gt 0)
+        AutoStallReasons = ($stallReasons -join ';')
         PowerSource = $powerSource
         BatteryChargePct = $batteryPercent
     }
