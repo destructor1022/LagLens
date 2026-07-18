@@ -1,0 +1,12 @@
+# LagLens produces local diagnostic data that should never be committed.
+LagLens/Reports/
+LagLens/*.request
+LagLens/ANALYSIS_*.md
+LagLens-removal-receipt.txt
+LAGLENS_REMOVAL_MANIFEST.json
+
+# OS/editor debris.
+Thumbs.db
+.DS_Store
+*.tmp
+*.bak
