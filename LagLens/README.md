@@ -20,6 +20,7 @@ A longer 15–30 minute recording is useful for intermittent lag. A 2–5 minute
 - GPU saturation when Windows exposes GPU Engine counters
 - Foreground app message-response time without recording window titles
 - DWM compositor refresh, missed frames, and dropped frames
+- Continuous one-second UI timing on AC (two seconds on battery), including recorder scheduling delays and automatically flagged stall reasons
 - Driver DPC/interrupt pressure and context-switching load
 - Top processes by CPU, memory, disk I/O, and GPU usage
 - Battery design/full-charge capacity, cycle count, charger state, charge level, discharge rate, brightness, and thermal data when exposed
@@ -48,17 +49,19 @@ Add `-NoOpen` if you do not want the finished report to open automatically.
 
 ## Automatic background monitoring
 
-Double-click **Install Startup Monitoring.cmd** to make LagLens start quietly whenever you sign in. The background mode:
+Double-click **Install Startup Monitoring.cmd** to register LagLens as a standard-user Windows scheduled task. It starts quietly at sign-in and unlock, restarts after an unexpected failure, and does not require administrator rights. If Windows blocks task registration, the installer keeps the older Startup-shortcut method as a fallback. The background mode:
 
 - samples every 15 seconds to keep overhead low on an older computer;
+- continuously samples the interactive foreground app and desktop compositor every second on AC and every two seconds on battery;
+- automatically flags foreground hangs, 100 ms response delays, compositor misses/drops, input-time FPS collapses, long recorder scheduling delays, high DPC time, and 100 ms storage transfers;
 - saves a full report every two hours;
 - continuously checkpoints a `-live.csv` file, so a shutdown does not erase the current session;
 - records the top CPU, memory, I/O, and GPU processes with each sample; and
 - automatically deletes diagnostic files older than 30 days.
 
-The current state is written to `Reports\LagLens-background-status.txt`. Double-click **Disable Startup Monitoring.cmd** to remove the startup entry and stop the active monitor.
+The current state is written to `Reports\LagLens-background-status.txt`; unexpected monitor or child-recorder exits are appended to `Reports\LagLens-background-errors.log`. Double-click **Disable Startup Monitoring.cmd** to unregister the task (or fallback shortcut) and stop the active monitor.
 
-Press **Ctrl+Alt+L** or double-click the desktop **Mark Lag Now** shortcut while an app or Windows feels slow. The marker records only the timestamp, foreground process name, and power state. The background recorder switches from 15-second sampling to two-second sampling, and an interactive companion records app response and compositor timing once per second for two minutes. It stores only process names and input timing—not window titles, keys, buttons, mouse positions, or input contents.
+Press **Ctrl+Alt+L** or double-click the desktop **Mark Lag Now** shortcut while an app or Windows feels slow. The marker records only the timestamp, foreground process name, and power state. The system recorder switches from 15-second sampling to two-second sampling, and a separate marker trace preserves a clearly labeled two-minute close-up. The continuous UI sentinel means useful responsiveness data is still collected if you forget the hotkey. It stores only process names and input timing—not window titles, keys, buttons, mouse positions, or input contents.
 
 When troubleshooting is finished, use the removal kit one folder above LagLens: `LAGLENS_REMOVAL_INSTRUCTIONS.md` and `REMOVE LAGLENS COMPLETELY.cmd`. The complete remover stops the monitor, removes the Startup shortcut, deletes all LagLens logs and files, and leaves a receipt without touching other outputs.
 

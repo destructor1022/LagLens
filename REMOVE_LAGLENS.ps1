@@ -13,6 +13,7 @@ $startupShortcut = Join-Path $startupFolder 'LagLens Background Monitor.lnk'
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Mark Lag Now.lnk'
 $stopRequest = Join-Path $installRoot 'stop-background-monitor.request'
 $receiptPath = Join-Path $outputsRoot 'LagLens-removal-receipt.txt'
+$taskName = 'LagLens Background Monitor'
 
 # Safety: this remover may only delete a sibling folder named LagLens inside
 # the outputs folder containing this script.
@@ -46,10 +47,38 @@ function Test-LagLensMonitorRunning {
     }
 }
 
+function Get-LagLensScheduledTask {
+    try {
+        $service = New-Object -ComObject 'Schedule.Service'
+        $service.Connect()
+        return $service.GetFolder('\').GetTask($taskName)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Remove-LagLensScheduledTask {
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $root = $service.GetFolder('\')
+    $task = $null
+    try { $task = $root.GetTask($taskName) } catch { return $false }
+    try {
+        if ($task.State -eq 4) { $task.Stop(0) }
+    }
+    catch { }
+    $root.DeleteTask($taskName, 0)
+    return $true
+}
+
 $monitorRunning = Test-LagLensMonitorRunning
+$scheduledTaskPresent = ($null -ne (Get-LagLensScheduledTask))
+$scheduledTaskWasPresent = $scheduledTaskPresent
 
 Write-Host 'LagLens complete removal' -ForegroundColor Cyan
 Write-Host "Monitor currently running: $monitorRunning"
+Write-Host "Scheduled task installed: $scheduledTaskPresent ($taskName)"
 Write-Host "Startup shortcut: $startupShortcut"
 Write-Host "Desktop lag-marker shortcut: $desktopShortcut"
 Write-Host "Installation and logs: $installRoot"
@@ -80,8 +109,21 @@ if ($monitorRunning) {
         Start-Sleep -Seconds 1
     }
     if (Test-LagLensMonitorRunning) {
-        throw 'LagLens did not stop within 35 seconds. Nothing was deleted; try again after signing out and back in.'
+        if ($scheduledTaskPresent) {
+            Write-Host 'The cooperative stop timed out; stopping and unregistering the scheduled task.' -ForegroundColor Yellow
+            [void](Remove-LagLensScheduledTask)
+            $scheduledTaskPresent = $false
+            Start-Sleep -Seconds 3
+        }
+        if (Test-LagLensMonitorRunning) {
+            throw 'LagLens did not stop within 35 seconds. Nothing was deleted; try again after signing out and back in.'
+        }
     }
+}
+
+if ($scheduledTaskPresent) {
+    [void](Remove-LagLensScheduledTask)
+    Write-Host 'Removed the LagLens scheduled task.'
 }
 
 if (Test-Path $stopRequest) { Remove-Item -LiteralPath $stopRequest -Force }
@@ -103,6 +145,7 @@ $receipt = @(
     'LagLens removal completed successfully.'
     "Removed at: $((Get-Date).ToString('o'))"
     "Removed startup shortcut: $startupShortcut"
+    "Scheduled task was present and removed: $scheduledTaskWasPresent ($taskName)"
     "Removed desktop shortcut: $desktopShortcut"
     "Removed installation and logs: $installRoot"
     'No other output folders or files were targeted.'
